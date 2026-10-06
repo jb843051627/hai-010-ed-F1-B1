@@ -45,13 +45,13 @@ CREATE TABLE IF NOT EXISTS t_ed_course_task (
   due_at datetime DEFAULT NULL COMMENT '选课截止那一天最后一刻（定后不许改）',
   amount decimal(12,2) DEFAULT NULL COMMENT '单条提前催办的自然日数（唯一可调的口径）',
   content varchar(255) DEFAULT NULL COMMENT '催办事由与受派辅导员记要',
-  status int DEFAULT NULL COMMENT '条目情形 0待派 1已派 2已撤单 3已挂起',
+  status int DEFAULT NULL COMMENT '条目情形 0待派 1已派 2派不出去（撤单/挂起/到期未派出都记2，原由写stop_reason）',
   student_id bigint DEFAULT NULL COMMENT '关联学生底档 t_ed_student.id（浮出前查在籍）',
   assignee varchar(64) DEFAULT NULL COMMENT '受派辅导员工号 t_ed_counselor.counselor_no',
   dispatched_at datetime DEFAULT NULL COMMENT '真派出的时刻（写一次，不许覆盖）',
-  window_code varchar(16) DEFAULT NULL COMMENT '派出所在档 DAY白天档 PEAK高峰档',
+  window_code varchar(16) DEFAULT NULL COMMENT '派出所在档 URGING催办窗口内（墙钟02:00含-05:00不含）',
   round_id varchar(40) DEFAULT NULL COMMENT '派出那一轮的轮次号（档位-时刻）',
-  stop_reason varchar(255) DEFAULT NULL COMMENT '挂起或撤单的原由（留痕）',
+  stop_reason varchar(255) DEFAULT NULL COMMENT '派不出去(2)的原由（留痕）',
   del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
   create_by varchar(64) DEFAULT NULL COMMENT '创建者',
   create_time datetime DEFAULT NULL COMMENT '创建时间',
@@ -160,4 +160,9 @@ VALUES (0, 'CS00', '陈启', 'G1', 0, 0, 'seed', NOW()),
        (1, 'CS01', '林岚', 'G1', 0, 0, 'seed', NOW()),
        (2, 'CS02', '赵蔚', 'G2', 0, 0, 'seed', NOW()),
        (3, 'CS03', '周航', 'G3', 1, 0, 'seed', NOW());
+
+-- 口径收敛（条目情形只留三档 0待派/1已派/2派不出去）：
+-- 旧的 status=3（已挂起）一律并入 2，原由仍留在 stop_reason。
+-- 幂等：并入后不再有 status=3 的行，重复执行不产生新影响。
+UPDATE t_ed_course_task SET status = 2, update_time = NOW() WHERE status = 3;
 
