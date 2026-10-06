@@ -70,7 +70,10 @@ public class GlobalExceptionResolver{
     public AjaxResult validatedBindException(BindException e)
     {
     	logger.error("自定义验证异常", e);
-        String message = e.getAllErrors().get(0).getDefaultMessage();
+        // 错误清单可能为空，空集合不许直接取首条
+        String message = e.getAllErrors().isEmpty()
+                ? "参数校验失败"
+                : e.getAllErrors().get(0).getDefaultMessage();
         return AjaxResult.error(message);
     }
     

@@ -31,13 +31,15 @@ import com.fc.v2.util.CourseDispatchCalendar;
  * <ul>
  *   <li>同一把尺子：浮出、超三天、窗口、回写全用传入的同一刻，见
  *       {@link CourseDispatchCalendar}；截止那一刻定后不许改，只许调“还剩几天”。</li>
+ *   <li>催办窗口就一档（定死的口径）：墙钟 02:00 起、05:00 止，02:00 算窗口内、
+ *       05:00 算窗口外；窗口外到期的条目这一轮一律不派，一条不动，留到下一轮。</li>
+ *   <li>条目情形只有三档：0 待派、1 已派、2 派不出去。撤单、挂起、到期没派出去的
+ *       都记 2，原由写进留痕那一栏（stop_reason），不另起第四档。</li>
  *   <li>派给谁：在催越多权重越低、手头空的先接；超三天没催出去的顶到最前头。</li>
  *   <li>派出即写派发时刻并把情形从待派翻成已派，一条 SQL 同时落，缺一不算成；
- *       更新带“仍待派”条件，几个触发点撞在同一刻也只派成一条（幂等）。</li>
- *   <li>分时段：白天一档、高峰三天单开一档、夜间与法定节假日整段不派；
- *       窗口外到期的放着等下一轮。</li>
- *   <li>办不成的：学生退学休学或辅导员整组调走就地挂起写明原由，挂一条不拖整轮；
- *       截止过了还派不出去的撤单留痕，截止日与真派出的时刻不许被覆盖。</li>
+ *       更新带“仍待派”条件，几个触发点撞在同一刻也只翻成一条，没抢到的本轮不计数
+ *       （重跑幂等：已翻走的条目下一轮不会再当待派捞出来）。</li>
+ *   <li>挂一条不拖整轮：单条出岔子记日志，其余照常往下派。</li>
  * </ul>
  *
  * @author fuce
@@ -48,11 +50,10 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
 
     private static final Logger log = LoggerFactory.getLogger(TEdCourseTaskServiceImpl.class);
 
-    /** 条目情形 */
-    private static final int ST_PENDING = 0;    // 待派
-    private static final int ST_DISPATCHED = 1; // 已派
-    private static final int ST_CANCELLED = 2;  // 已撤单（派不出去，留痕）
-    private static final int ST_SUSPENDED = 3;  // 已挂起
+    /** 条目情形：只有三档，派不出去不另起第四档 */
+    private static final int ST_PENDING = 0;       // 待派
+    private static final int ST_DISPATCHED = 1;    // 已派
+    private static final int ST_UNDISPATCHABLE = 2; // 派不出去（撤单/挂起/到期没派出去，原由见留痕）
 
     /** 学生底档情形：0在籍 */
     private static final int STUDENT_ACTIVE = 0;
@@ -76,7 +77,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
     /**
      * 本轮该浮出来的提醒：仍待派、到 at 这一刻已走过浮出时刻，
      * 按教务处说死的次序排好（超三天顶头、截止早的先、再按提醒号）。
-     * 已派/挂起/撤单的一律不再当待派捞出来。
+     * 已派/派不出去的一律不再当待派捞出来。
      */
     @Override
     public List<TEdCourseTask> listDue(Date at) {
@@ -94,8 +95,9 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
     }
 
     /**
-     * 以 at 为全校同一刻跑一轮：先给截止已过的撤单留痕，窗口开着再逐条挂起/派单，
-     * 窗口外到期的放着等下一轮。这一轮没有到期的就直说没活，不算故障。
+     * 以 at 为全校同一刻跑一轮：窗口外一条不动（到期的留到下一轮）；
+     * 窗口内逐条来——截止已过的记派不出去留痕，办不成的记派不出去写明原由，
+     * 其余派出。这一轮没有到期的就直说没活，不算故障。
      */
     @Override
     public CourseTaskRoundResult runRound(Date at) {
@@ -113,50 +115,57 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
             return result;
         }
 
-        // 截止过了还派不出去的：只能撤单或改用途。撤单留痕，不是派单，不分时段。
-        List<TEdCourseTask> live = new ArrayList<TEdCourseTask>();
-        List<TEdCourseTask> details = new ArrayList<TEdCourseTask>();
-        for (TEdCourseTask r : due) {
-            if (CourseDispatchCalendar.isPastDue(r.getDueAt(), now)) {
-                details.add(cancelOne(r, now, "截止已过仍未派出，撤单留痕"));
-            } else {
-                live.add(r);
-            }
-        }
-
         if (CourseDispatchCalendar.WINDOW_CLOSED.equals(window)) {
-            // 夜间或法定节假日整段不派：窗口外到期的放着，等下一轮再动
-            details.addAll(live);
-            result.setDetails(details);
-            result.setMessage("窗口外（夜间或法定节假日）整段不派，到期的 " + live.size() + " 条放着等下一轮");
+            // 窗口外一律不派：到期的一条不动（撤单、挂起也只在窗口内落），留到下一轮
+            result.setDetails(due);
+            result.setMessage("窗口外（催办窗口为墙钟02:00起、05:00止，05:00算窗口外）一律不派，到期的 "
+                    + due.size() + " 条留到下一轮");
             return result;
         }
 
-        // 窗口开着：辅导员名册与在催数一次点清，本轮内自增
+        // 窗口内：辅导员名册与在催数一次点清，本轮内自增
         List<TEdCounselor> counselors = listOnDutyCounselors();
         Map<String, Long> inUrging = countInUrging();
         String operator = operator();
-        for (TEdCourseTask r : live) {
+        List<TEdCourseTask> details = new ArrayList<TEdCourseTask>();
+        int skipped = 0;
+        for (TEdCourseTask r : due) {
             try {
-                String suspendReason = suspendReasonOf(r);
-                if (suspendReason != null) {
-                    details.add(suspendOne(r, now, suspendReason, operator));
-                    continue;
+                TEdCourseTask after;
+                if (CourseDispatchCalendar.isPastDue(r.getDueAt(), now)) {
+                    // 到期没派出去的：记派不出去，原由留痕
+                    after = markUndispatchable(r, now, "截止已过仍未派出，到期没派出去，留痕", operator);
+                } else {
+                    String stopReason = suspendReasonOf(r);
+                    if (stopReason == null && counselors.isEmpty()) {
+                        stopReason = "辅导员整组调走，无在岗辅导员可派";
+                    }
+                    if (stopReason != null) {
+                        after = markUndispatchable(r, now, stopReason, operator);
+                    } else {
+                        after = dispatchOne(r, now, window, result.getRoundId(), counselors, inUrging, operator);
+                    }
                 }
-                if (counselors.isEmpty()) {
-                    details.add(suspendOne(r, now, "辅导员整组调走，无在岗辅导员可派", operator));
-                    continue;
+                if (after == null) {
+                    // 同一刻被别的触发点抢先翻走：本轮不算它，免得同一条在两轮里都记一遍
+                    skipped++;
+                    log.warn("选课催办派单同一刻撞车，本条由先到的触发点处理 id={}", r.getId());
+                } else {
+                    details.add(after);
                 }
-                details.add(dispatchOne(r, now, window, result.getRoundId(), counselors, inUrging, operator));
             } catch (Exception e) {
-                // 挂一条不拖整轮：单条出岔子记日志，其余照常往下派
+                // 挂一条不拖整轮：单条出岔子记日志，情形留在待派，下一轮再来
                 log.error("选课催办派单单条处理失败 id={}", r.getId(), e);
                 details.add(r);
             }
         }
         result.setDetails(details);
-        result.setMessage("本轮派完：待派 " + result.getPending() + "、已派 " + result.getDispatched()
-                + "、挂起 " + result.getSuspended() + "、撤单 " + result.getCancelled());
+        String message = "本轮派完：待派 " + result.getPending() + "、已派 " + result.getDispatched()
+                + "、派不出去 " + result.getUndispatchable();
+        if (skipped > 0) {
+            message += "（另有 " + skipped + " 条同一刻被别的触发点处理，见日志）";
+        }
+        result.setMessage(message);
         return result;
     }
 
@@ -192,7 +201,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
     }
 
     /**
-     * 调口径：真要调只许调“还剩几天”（且须仍待派）；事由在待派/已撤单（改用途）时可改。
+     * 调口径：真要调只许调“还剩几天”（且须仍待派）；事由在待派/派不出去（改用途）时可改。
      * 截止那一刻与真派出的时刻一律以库里的为准，不许被覆盖。
      */
     @Override
@@ -221,8 +230,8 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
         } else {
             upd.setAmount(cur.getAmount());
         }
-        // 事由：待派可改；已撤单可改（改用途）；其余情形不动
-        if (st.intValue() == ST_PENDING || st.intValue() == ST_CANCELLED) {
+        // 事由：待派可改；派不出去可改（改用途）；其余情形不动
+        if (st.intValue() == ST_PENDING || st.intValue() == ST_UNDISPATCHABLE) {
             upd.setContent(record.getContent() != null ? record.getContent() : cur.getContent());
             upd.setRemark(record.getRemark() != null ? record.getRemark() : cur.getRemark());
         } else {
@@ -237,7 +246,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
     }
 
     /**
-     * 就地挂起：写明原由；只从待派翻，挂起的不再参与后续派单。
+     * 就地挂起：记派不出去（2），原由写进留痕；只从待派翻，翻走的不再参与后续派单。
      */
     @Override
     public int suspendTEdCourseTask(Long id, String reason) {
@@ -248,12 +257,17 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
         if (cur == null || cur.getStatus() == null || cur.getStatus().intValue() != ST_PENDING) {
             return 0;
         }
-        TEdCourseTask after = suspendOne(cur, new Date(), reason == null ? "人工挂起" : reason, operator());
-        return after.getStatus() != null && after.getStatus().intValue() == ST_SUSPENDED ? 1 : 0;
+        TEdCourseTask after = markUndispatchable(cur, new Date(), reason == null ? "人工挂起，记派不出去" : reason, operator());
+        if (after == null) {
+            // 同一刻被别的触发点翻了：以库里的为准，已在派不出去档也算成
+            after = this.edCourseTaskMapper.selectById(id);
+        }
+        return after != null && after.getStatus() != null && after.getStatus().intValue() == ST_UNDISPATCHABLE ? 1 : 0;
     }
 
     /**
-     * 撤单留痕：只从待派翻；截止日与真派出的时刻不动。
+     * 撤单留痕：记派不出去（2），与挂起、到期没派出去同一档；只从待派翻；
+     * 截止日与真派出的时刻不动。
      */
     @Override
     public int cancelTEdCourseTask(Long id, String reason) {
@@ -264,8 +278,12 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
         if (cur == null || cur.getStatus() == null || cur.getStatus().intValue() != ST_PENDING) {
             return 0;
         }
-        TEdCourseTask after = cancelOne(cur, new Date(), reason == null ? "人工撤单留痕" : reason);
-        return after.getStatus() != null && after.getStatus().intValue() == ST_CANCELLED ? 1 : 0;
+        TEdCourseTask after = markUndispatchable(cur, new Date(), reason == null ? "人工撤单，记派不出去留痕" : reason, operator());
+        if (after == null) {
+            // 同一刻被别的触发点翻了：以库里的为准，已在派不出去档也算成
+            after = this.edCourseTaskMapper.selectById(id);
+        }
+        return after != null && after.getStatus() != null && after.getStatus().intValue() == ST_UNDISPATCHABLE ? 1 : 0;
     }
 
     // ================= 一轮里的单条动作（都带“仍待派”条件，撞车只成一条） =================
@@ -274,6 +292,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
      * 派出一条：派发时刻与情形翻转同一条 SQL 落，缺一不算成；
      * 条件里钉死“仍待派”，几个触发点撞在同一刻也只派成一条。
      * 派出去的带本轮轮次号，下一轮不会再当待派捞出来。
+     * 没抢到的返回 null：本轮不算它，计数与明细都不重复记。
      */
     private TEdCourseTask dispatchOne(TEdCourseTask r, Date at, String window, String roundId,
             List<TEdCounselor> counselors, Map<String, Long> inUrging, String operator) {
@@ -290,9 +309,8 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
                 .set("update_by", operator)
                 .set("update_time", at));
         if (rows == 0) {
-            // 同一刻已被别的触发点派走：当天再进来的直接忽略，先前派的那次原样留着
-            TEdCourseTask fresh = this.edCourseTaskMapper.selectById(r.getId());
-            return fresh == null ? r : fresh;
+            // 同一刻已被别的触发点派走：本轮不算它，先前派的那次原样留着
+            return null;
         }
         r.setStatus(ST_DISPATCHED);
         r.setAssignee(assignee);
@@ -303,45 +321,30 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
         return r;
     }
 
-    /** 挂起一条：带“仍待派”条件，写明原由 */
-    private TEdCourseTask suspendOne(TEdCourseTask r, Date at, String reason, String operator) {
+    /**
+     * 记一条派不出去：撤单、挂起、到期没派出去的就这一个档（2），原由写进留痕那一栏，
+     * 三条路同一份动作（同源）。带“仍待派”条件，同一刻撞车只成一条；
+     * 没抢到的返回 null：本轮不算它。截止日与真派出的时刻不动。
+     */
+    private TEdCourseTask markUndispatchable(TEdCourseTask r, Date at, String reason, String operator) {
         int rows = this.edCourseTaskMapper.update(null, new UpdateWrapper<TEdCourseTask>()
                 .eq("id", r.getId())
                 .eq("status", ST_PENDING)
                 .eq("del_flag", 0)
-                .set("status", ST_SUSPENDED)
+                .set("status", ST_UNDISPATCHABLE)
                 .set("stop_reason", reason)
                 .set("update_by", operator)
                 .set("update_time", at));
         if (rows == 0) {
-            TEdCourseTask fresh = this.edCourseTaskMapper.selectById(r.getId());
-            return fresh == null ? r : fresh;
+            // 同一刻已被别的触发点翻走：本轮不算它
+            return null;
         }
-        r.setStatus(ST_SUSPENDED);
+        r.setStatus(ST_UNDISPATCHABLE);
         r.setStopReason(reason);
         return r;
     }
 
-    /** 撤单一条：带“仍待派”条件，留痕；截止日与派发时刻不动 */
-    private TEdCourseTask cancelOne(TEdCourseTask r, Date at, String reason) {
-        int rows = this.edCourseTaskMapper.update(null, new UpdateWrapper<TEdCourseTask>()
-                .eq("id", r.getId())
-                .eq("status", ST_PENDING)
-                .eq("del_flag", 0)
-                .set("status", ST_CANCELLED)
-                .set("stop_reason", reason)
-                .set("update_by", operator())
-                .set("update_time", at));
-        if (rows == 0) {
-            TEdCourseTask fresh = this.edCourseTaskMapper.selectById(r.getId());
-            return fresh == null ? r : fresh;
-        }
-        r.setStatus(ST_CANCELLED);
-        r.setStopReason(reason);
-        return r;
-    }
-
-    // ================= 派给谁 / 挂不挂 =================
+    // ================= 派给谁 / 派不派得出去 =================
 
     /**
      * 派给谁：手头在催越少越先接，空的先接；一样空按工号字典序（说死，不许插队）。
@@ -361,7 +364,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
     }
 
     /**
-     * 这条该不该就地挂起：学生在提醒浮出来前退学休学（底档注销）→ 写明原由。
+     * 这条该不该记派不出去：学生在提醒浮出来前退学休学（底档注销）→ 写明原由。
      * 未挂底档的老数据不挡路，照常往下派。
      */
     private String suspendReasonOf(TEdCourseTask r) {
@@ -372,7 +375,7 @@ public class TEdCourseTaskServiceImpl implements ITEdCourseTaskService {
                 .eq("id", r.getStudentId())
                 .eq("del_flag", 0));
         if (stu == null || stu.getStatus() == null || stu.getStatus().intValue() != STUDENT_ACTIVE) {
-            return "提醒浮出前学生已退学休学（底档注销），就地挂起";
+            return "提醒浮出前学生已退学休学（底档注销）";
         }
         return null;
     }

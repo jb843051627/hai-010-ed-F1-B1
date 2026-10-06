@@ -1,15 +1,10 @@
 package com.fc.v2.util;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.HashSet;
-import java.util.Set;
 
 import com.fc.v2.model.auto.TEdCourseTask;
 
@@ -21,9 +16,9 @@ import com.fc.v2.model.auto.TEdCourseTask;
  * 浮出、派单、回写不许各算各的。截止那一刻（due_at）定后不许改，
  * 真要调只许调“还剩几天”（amount）。</p>
  *
- * <p>派单分时段：白天一档 {@link #WINDOW_DAY}（08:00–18:00），
- * 选课高峰三天单开一档 {@link #WINDOW_PEAK}（08:00–22:00，不走日常档），
- * 夜间与法定节假日整段不派（{@link #WINDOW_CLOSED}）。</p>
+ * <p>催办窗口就一档（定死的口径）：墙钟 02:00 起、05:00 止，
+ * 02:00 算窗口内、05:00 算窗口外（{@link #WINDOW_URGE}／{@link #WINDOW_CLOSED}）。
+ * 窗口外到期的条目这一轮一律不派，留到下一轮再说。</p>
  *
  * @author fuce
  * @date 2026-10-05
@@ -33,57 +28,23 @@ public final class CourseDispatchCalendar {
     private CourseDispatchCalendar() {
     }
 
-    /** 全校统一时区：窗口、节假日、轮次号都按它取 */
+    /** 全校统一时区：窗口、轮次号都按它取 */
     private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
 
-    /** 白天档（按值班划的日常档） */
-    public static final String WINDOW_DAY = "DAY";
-    /** 选课高峰档（高峰三天单开，不走日常档） */
-    public static final String WINDOW_PEAK = "PEAK";
-    /** 窗口外：夜间或法定节假日，整段不派 */
+    /** 催办窗口（墙钟 02:00 起、05:00 止；02:00 算窗口内、05:00 算窗口外） */
+    public static final String WINDOW_URGE = "URGE";
+    /** 窗口外：一律不派，到期的留到下一轮 */
     public static final String WINDOW_CLOSED = "CLOSED";
 
-    /** 白天档起止（08:00 起，18:00 止不含） */
-    private static final int DAY_START_HOUR = 8;
-    private static final int DAY_END_HOUR = 18;
-    /** 高峰档起止（08:00 起，22:00 止不含） */
-    private static final int PEAK_START_HOUR = 8;
-    private static final int PEAK_END_HOUR = 22;
+    /** 窗口起点（墙钟 02:00，算窗口内） */
+    private static final int URGE_START_HOUR = 2;
+    /** 窗口止点（墙钟 05:00，算窗口外） */
+    private static final int URGE_END_HOUR = 5;
 
     /** 一天的毫秒数（提前天数按自然日折算） */
     private static final BigDecimal DAY_MILLIS = new BigDecimal(24L * 60L * 60L * 1000L);
     /** 超三天未派出的顶到最前头：三天对应的毫秒数 */
     private static final long STALE_MILLIS = 3L * 24L * 60L * 60L * 1000L;
-
-    /**
-     * 法定节假日（整段不派）。按校历/国务院办公厅发布维护，调年份只改这里。
-     */
-    private static final Set<LocalDate> LEGAL_HOLIDAYS = new HashSet<LocalDate>(Arrays.asList(
-            // 元旦
-            LocalDate.of(2026, 1, 1), LocalDate.of(2026, 1, 2), LocalDate.of(2026, 1, 3),
-            // 春节
-            LocalDate.of(2026, 2, 16), LocalDate.of(2026, 2, 17), LocalDate.of(2026, 2, 18),
-            LocalDate.of(2026, 2, 19), LocalDate.of(2026, 2, 20), LocalDate.of(2026, 2, 21),
-            LocalDate.of(2026, 2, 22),
-            // 清明
-            LocalDate.of(2026, 4, 4), LocalDate.of(2026, 4, 5), LocalDate.of(2026, 4, 6),
-            // 劳动节
-            LocalDate.of(2026, 5, 1), LocalDate.of(2026, 5, 2), LocalDate.of(2026, 5, 3),
-            LocalDate.of(2026, 5, 4), LocalDate.of(2026, 5, 5),
-            // 端午
-            LocalDate.of(2026, 6, 19), LocalDate.of(2026, 6, 20), LocalDate.of(2026, 6, 21),
-            // 中秋
-            LocalDate.of(2026, 9, 25), LocalDate.of(2026, 9, 26), LocalDate.of(2026, 9, 27),
-            // 国庆
-            LocalDate.of(2026, 10, 1), LocalDate.of(2026, 10, 2), LocalDate.of(2026, 10, 3),
-            LocalDate.of(2026, 10, 4), LocalDate.of(2026, 10, 5), LocalDate.of(2026, 10, 6),
-            LocalDate.of(2026, 10, 7)));
-
-    /**
-     * 选课高峰那三天（单开高峰档，不走日常档）。按教务处每学期选课安排维护。
-     */
-    private static final Set<LocalDate> PEAK_DAYS = new HashSet<LocalDate>(Arrays.asList(
-            LocalDate.of(2026, 9, 7), LocalDate.of(2026, 9, 8), LocalDate.of(2026, 9, 9)));
 
     // ================= 同一把尺子 =================
 
@@ -116,24 +77,18 @@ public final class CourseDispatchCalendar {
         return surface != null && at != null && at.getTime() - surface.getTime() > STALE_MILLIS;
     }
 
-    // ================= 派单分时段 =================
+    // ================= 催办窗口 =================
 
     /**
-     * at 落在哪一档：法定节假日整段不派；高峰三天走高峰档；其余白天走日常档；夜间不派。
+     * at 在不在催办窗口里：墙钟 02:00 起（算窗口内）、05:00 止（算窗口外），
+     * 只认墙钟，全系统只此一处。窗口外一律不派，到期的留到下一轮。
      */
     public static String windowOf(Date at) {
         if (at == null) {
             return WINDOW_CLOSED;
         }
-        LocalDateTime t = at.toInstant().atZone(ZONE).toLocalDateTime();
-        if (LEGAL_HOLIDAYS.contains(t.toLocalDate())) {
-            return WINDOW_CLOSED;
-        }
-        int hour = t.getHour();
-        if (PEAK_DAYS.contains(t.toLocalDate())) {
-            return (hour >= PEAK_START_HOUR && hour < PEAK_END_HOUR) ? WINDOW_PEAK : WINDOW_CLOSED;
-        }
-        return (hour >= DAY_START_HOUR && hour < DAY_END_HOUR) ? WINDOW_DAY : WINDOW_CLOSED;
+        int hour = at.toInstant().atZone(ZONE).getHour();
+        return (hour >= URGE_START_HOUR && hour < URGE_END_HOUR) ? WINDOW_URGE : WINDOW_CLOSED;
     }
 
     /** 轮次号：档位 + 本轮时刻（全校同一时区），同一刻撞进来的触发点共用同一个轮次号 */

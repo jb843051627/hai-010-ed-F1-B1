@@ -45,13 +45,13 @@ CREATE TABLE IF NOT EXISTS t_ed_course_task (
   due_at datetime DEFAULT NULL COMMENT '选课截止那一天最后一刻（定后不许改）',
   amount decimal(12,2) DEFAULT NULL COMMENT '单条提前催办的自然日数（唯一可调的口径）',
   content varchar(255) DEFAULT NULL COMMENT '催办事由与受派辅导员记要',
-  status int DEFAULT NULL COMMENT '条目情形 0待派 1已派 2已撤单 3已挂起',
+  status int DEFAULT NULL COMMENT '条目情形 0待派 1已派 2派不出去（撤单/挂起/到期没派出去，原由见留痕）',
   student_id bigint DEFAULT NULL COMMENT '关联学生底档 t_ed_student.id（浮出前查在籍）',
   assignee varchar(64) DEFAULT NULL COMMENT '受派辅导员工号 t_ed_counselor.counselor_no',
   dispatched_at datetime DEFAULT NULL COMMENT '真派出的时刻（写一次，不许覆盖）',
-  window_code varchar(16) DEFAULT NULL COMMENT '派出所在档 DAY白天档 PEAK高峰档',
+  window_code varchar(16) DEFAULT NULL COMMENT '派出所在档 URGE催办窗口',
   round_id varchar(40) DEFAULT NULL COMMENT '派出那一轮的轮次号（档位-时刻）',
-  stop_reason varchar(255) DEFAULT NULL COMMENT '挂起或撤单的原由（留痕）',
+  stop_reason varchar(255) DEFAULT NULL COMMENT '派不出去的原由（撤单/挂起/到期没派出去，留痕）',
   del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
   create_by varchar(64) DEFAULT NULL COMMENT '创建者',
   create_time datetime DEFAULT NULL COMMENT '创建时间',
@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS t_ed_course_task (
   remark varchar(500) DEFAULT NULL COMMENT '备注',
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='选课催办事项条';
+
+-- 口径迁移（条目情形收成三档 0待派/1已派/2派不出去 后）：
+-- 老数据里 status=3（已挂起）的行三档都不沾，对账前须一次性并入派不出去档，原由已在留痕栏。
+-- UPDATE t_ed_course_task SET status = 2 WHERE status = 3;
 
 CREATE TABLE IF NOT EXISTS t_ed_counselor (
   id bigint NOT NULL COMMENT '主键',

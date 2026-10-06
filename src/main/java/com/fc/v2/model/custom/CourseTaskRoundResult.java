@@ -8,7 +8,7 @@ import java.util.List;
 import com.fc.v2.model.auto.TEdCourseTask;
 
 /**
- * 一轮派单的结果。三项计数（待派/已派/挂起）与明细同出一份快照：
+ * 一轮派单的结果。三项计数（待派/已派/派不出去）与明细同出一份快照：
  * 计数不是另起的 COUNT 查询，而是从 {@link #details} 这份明细上点出来的，
  * 屏上三处数与库里明细两边对的是同一份数。
  *
@@ -21,7 +21,7 @@ public class CourseTaskRoundResult implements Serializable {
     /** 本轮轮次号（档位-时刻） */
     private String roundId;
 
-    /** 本轮落在哪一档 DAY白天档 PEAK高峰档 CLOSED窗口外 */
+    /** 本轮落在哪一档 URGE催办窗口 CLOSED窗口外 */
     private String windowCode;
 
     /** 本轮用的那一刻（全校同一把尺子） */
@@ -94,14 +94,9 @@ public class CourseTaskRoundResult implements Serializable {
         return countByStatus(1);
     }
 
-    /** 本轮撤单几条（只算这一轮） */
-    public long getCancelled() {
+    /** 本轮派不出去几条（撤单/挂起/到期没派出去同这一档，只算这一轮） */
+    public long getUndispatchable() {
         return countByStatus(2);
-    }
-
-    /** 本轮挂起几条（只算这一轮） */
-    public long getSuspended() {
-        return countByStatus(3);
     }
 
     private long countByStatus(int status) {

@@ -11,8 +11,9 @@ import com.fc.v2.model.custom.CourseTaskRoundResult;
 import com.fc.v2.service.ITEdCourseTaskService;
 
 /**
- * 选课催办派单定时入口。quartz 里配 {@code courseTaskDispatchTask.runRound()} 即可，
- * 白天档/高峰档内每小时点一次名；窗口外那一轮自然空跑（到期的放着等下一轮）。
+ * 选课催办派单定时入口。quartz 里配 {@code courseTaskDispatchTask.runRound()} 即可。
+ * 催办窗口就一档：墙钟 02:00 起、05:00 止（02:00 算窗口内、05:00 算窗口外）；
+ * 窗口外那一轮自然空跑，到期的一条不动，留到下一轮。
  *
  * @CLASSNAME CourseTaskDispatchTask
  * @author fuce
@@ -31,9 +32,9 @@ public class CourseTaskDispatchTask {
      */
     public void runRound() {
         CourseTaskRoundResult result = edCourseTaskService.runRound(new Date());
-        log.info("选课催办派单一轮跑完 roundId={} window={} 待派={} 已派={} 挂起={} 撤单={}：{}",
+        log.info("选课催办派单一轮跑完 roundId={} window={} 待派={} 已派={} 派不出去={}：{}",
                 result.getRoundId(), result.getWindowCode(),
-                result.getPending(), result.getDispatched(), result.getSuspended(), result.getCancelled(),
+                result.getPending(), result.getDispatched(), result.getUndispatchable(),
                 result.getMessage());
     }
 

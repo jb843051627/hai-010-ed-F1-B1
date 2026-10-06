@@ -121,13 +121,18 @@ public class TEdArchiveCardServiceImpl extends ServiceImpl<TEdArchiveCardMapper,
             return 0;
         }
         Integer st = cur.getStatus();
+        if (st == null) {
+            // 与 revert 同一口径：缺值按待核对，不直接抛出
+            st = ST_PENDING;
+        }
         int next;
-        if (st == ST_PENDING) {
+        if (st.intValue() == ST_PENDING) {
             next = ST_CHECKED;
-        } else if (st == ST_CHECKED) {
+        } else if (st.intValue() == ST_CHECKED) {
             next = ST_FROZEN;
         } else {
-            next = ST_CHECKED;
+            // 已压死是终态（与删除守卫同一口径）：不再参与任何推进
+            return 0;
         }
         UpdateWrapper<TEdArchiveCard> uw = new UpdateWrapper<TEdArchiveCard>()
                 .eq("id", id).eq("del_flag", 0);

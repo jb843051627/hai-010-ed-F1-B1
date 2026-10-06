@@ -53,9 +53,9 @@ public class TEdCourseTask implements Serializable {
     @ApiModelProperty(value = "催办事由与受派辅导员记要")
     private String content;
 
-    /** 条目情形 0待派 1已派 2已撤单 3已挂起 */
+    /** 条目情形 0待派 1已派 2派不出去（撤单/挂起/到期没派出去，原由见留痕） */
     @TableField("status")
-    @ApiModelProperty(value = "条目情形 0待派 1已派 2已撤单 3已挂起")
+    @ApiModelProperty(value = "条目情形 0待派 1已派 2派不出去（撤单/挂起/到期没派出去，原由见留痕）")
     private Integer status;
 
     /** 关联学生底档 t_ed_student.id（浮出前查在籍） */
@@ -74,9 +74,9 @@ public class TEdCourseTask implements Serializable {
     @ApiModelProperty(value = "真派出的时刻（写一次，不许覆盖）")
     private Date dispatchedAt;
 
-    /** 派出所在档 DAY白天档 PEAK高峰档 */
+    /** 派出所在档 URGE催办窗口 */
     @TableField("window_code")
-    @ApiModelProperty(value = "派出所在档 DAY白天档 PEAK高峰档")
+    @ApiModelProperty(value = "派出所在档 URGE催办窗口")
     private String windowCode;
 
     /** 派出那一轮的轮次号（档位-时刻） */
@@ -84,9 +84,9 @@ public class TEdCourseTask implements Serializable {
     @ApiModelProperty(value = "派出那一轮的轮次号（档位-时刻）")
     private String roundId;
 
-    /** 挂起或撤单的原由（留痕） */
+    /** 派不出去的原由（撤单/挂起/到期没派出去，留痕） */
     @TableField("stop_reason")
-    @ApiModelProperty(value = "挂起或撤单的原由（留痕）")
+    @ApiModelProperty(value = "派不出去的原由（撤单/挂起/到期没派出去，留痕）")
     private String stopReason;
 
     /** 删除标记 0正常 1删除 */
